@@ -54,6 +54,23 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
+func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
+	if r.Method == method {
+		return true
+	}
+	writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	return false
+}
+
+func ticketIDFromPath(r *http.Request) string {
+	id := r.PathValue("id")
+	if id != "" {
+		return id
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/tickets/")
+	return strings.TrimSuffix(path, "/status")
+}
+
 // --- Middleware ---
 func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -210,7 +227,7 @@ func listTicketsHandler(w http.ResponseWriter, r *http.Request) {
 
 // GET /tickets/{id}
 func getTicketHandler(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	id := ticketIDFromPath(r)
 	userID := r.Header.Get("X-User-ID")
 
 	db.mu.RLock()
@@ -231,7 +248,7 @@ func getTicketHandler(w http.ResponseWriter, r *http.Request) {
 
 // PATCH /tickets/{id}/status
 func updateTicketStatusHandler(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	id := ticketIDFromPath(r)
 	userID := r.Header.Get("X-User-ID")
 
 	var req struct {
@@ -279,14 +296,47 @@ func updateTicketStatusHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /health", healthHandler)
-	mux.HandleFunc("POST /auth/register", registerHandler)
-	mux.HandleFunc("POST /auth/login", loginHandler)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" || r.URL.Path == "/health" {
+			if requireMethod(w, r, http.MethodGet) {
+				healthHandler(w, r)
+			}
+			return
+		}
+		http.NotFound(w, r)
+	})
+	mux.HandleFunc("/auth/register", func(w http.ResponseWriter, r *http.Request) {
+		if requireMethod(w, r, http.MethodPost) {
+			registerHandler(w, r)
+		}
+	})
+	mux.HandleFunc("/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		if requireMethod(w, r, http.MethodPost) {
+			loginHandler(w, r)
+		}
+	})
 
-	mux.HandleFunc("POST /tickets", authMiddleware(createTicketHandler))
-	mux.HandleFunc("GET /tickets", authMiddleware(listTicketsHandler))
-	mux.HandleFunc("GET /tickets/{id}", authMiddleware(getTicketHandler))
-	mux.HandleFunc("PATCH /tickets/{id}/status", authMiddleware(updateTicketStatusHandler))
+	mux.HandleFunc("/tickets", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			createTicketHandler(w, r)
+		case http.MethodGet:
+			listTicketsHandler(w, r)
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+	}))
+	mux.HandleFunc("/tickets/", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/status") {
+			if requireMethod(w, r, http.MethodPatch) {
+				updateTicketStatusHandler(w, r)
+			}
+			return
+		}
+		if requireMethod(w, r, http.MethodGet) {
+			getTicketHandler(w, r)
+		}
+	}))
 
 	fmt.Println("Ticket system API is running on port 8080")
 	log.Fatal(http.ListenAndServe(":8080", mux))
